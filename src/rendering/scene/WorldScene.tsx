@@ -6,6 +6,7 @@ import { advanceResident, createResident, type WeatherState } from '../../simula
 import { clampDelta, createSeededRandom } from '../../simulation/core/random';
 import { dampResidentCoordinate } from '../characters/motion';
 import { getMovementVector, type MovementVector } from '../../gameplay/player/movement';
+import type { TouchMovement } from '../../gameplay/player/touch-input';
 import { getFacadeUvRepeat } from '../environment/facade-tiling';
 
 type RenderDiagnosticsSnapshot = {
@@ -33,6 +34,9 @@ type WorldSceneProps = {
   interiorOpen: boolean;
   onInteract: (interaction: Interaction) => void;
   onPosition: (position: [number, number]) => void;
+  touchMovement: TouchMovement;
+  touchRun: boolean;
+  cameraYaw: number;
 };
 
 const residents = [
@@ -358,8 +362,9 @@ function Resident({ id, name, seed, color, start, weather, hour }: {
   );
 }
 
-function Player({ vehicleMode, interiorOpen, onInteract, onPosition }: {
+function Player({ vehicleMode, interiorOpen, onInteract, onPosition, touchMovement, touchRun, cameraYaw }: {
   vehicleMode: boolean; interiorOpen: boolean; onInteract: (interaction: Interaction) => void; onPosition: (position: [number, number]) => void;
+  touchMovement: TouchMovement; touchRun: boolean; cameraYaw: number;
 }) {
   const group = useRef<THREE.Group>(null);
   const previousInterior = useRef(false);
@@ -418,10 +423,13 @@ function Player({ vehicleMode, interiorOpen, onInteract, onPosition }: {
   useFrame((_, delta) => {
     if (!group.current) return;
     const dt = clampDelta(delta, 0.1);
-    const movement = getMovementVector(keys.current, direction.current);
+    const keyboardMovement = getMovementVector(keys.current, direction.current);
+    const movement = Math.hypot(touchMovement.x, touchMovement.z) > 0.001
+      ? touchMovement
+      : keyboardMovement;
     walking.current = movement.x !== 0 || movement.z !== 0;
     if (walking.current) {
-      const speed = vehicleMode ? 10 : keys.current.ShiftLeft || keys.current.ShiftRight ? 5.2 : 3.1;
+      const speed = vehicleMode ? 10 : touchRun || keys.current.ShiftLeft || keys.current.ShiftRight ? 5.2 : 3.1;
       const nextX = THREE.MathUtils.clamp(group.current.position.x + movement.x * speed * dt, -19, 19);
       const nextZ = THREE.MathUtils.clamp(group.current.position.z + movement.z * speed * dt, -19, 17);
       if (!(nextX < -11 && nextZ < -13)) group.current.position.x = nextX;
@@ -429,9 +437,18 @@ function Player({ vehicleMode, interiorOpen, onInteract, onPosition }: {
       group.current.rotation.y = Math.atan2(movement.x, movement.z);
     }
     const p = group.current.position;
-    const desired = cameraTarget.current.set(p.x, p.y + (vehicleMode ? 8.2 : 7.6), p.z + (vehicleMode ? 22 : 20));
+    const cameraDistance = vehicleMode ? 22 : 20;
+    const desired = cameraTarget.current.set(
+      p.x - Math.sin(cameraYaw) * cameraDistance,
+      p.y + (vehicleMode ? 8.2 : 7.6),
+      p.z + Math.cos(cameraYaw) * cameraDistance,
+    );
     camera.position.lerp(desired, 1 - Math.exp(-3.4 * dt));
-    camera.lookAt(p.x, p.y + 1.0, p.z - 10.5);
+    camera.lookAt(
+      p.x + Math.sin(cameraYaw) * 10.5,
+      p.y + 1.0,
+      p.z - Math.cos(cameraYaw) * 10.5,
+    );
     lastReport.current += dt;
     if (lastReport.current > 0.35) {
       onPosition([p.x, p.z]);
@@ -699,7 +716,43 @@ function RenderDiagnostics() {
   return null;
 }
 
-function SceneContent({ weather, hour, vehicleMode, interiorOpen, onInteract, onPosition }: WorldSceneProps) {
+function AdaptiveDpr() {
+  const { setDpr } = useThree();
+  const elapsed = useRef(0);
+  const frameTotal = useRef(0);
+  const frameCount = useRef(0);
+  const degraded = useRef(false);
+  const stableTime = useRef(0);
+
+  useFrame((_, delta) => {
+    if (delta > 0.25) return;
+    elapsed.current += delta;
+    frameTotal.current += delta;
+    frameCount.current += 1;
+    if (elapsed.current < 3) return;
+    const average = frameTotal.current / Math.max(1, frameCount.current);
+    if (average > 0.025 && !degraded.current) {
+      setDpr(0.65);
+      degraded.current = true;
+      stableTime.current = 0;
+    } else if (average < 0.018 && degraded.current) {
+      stableTime.current += elapsed.current;
+      if (stableTime.current >= 12) {
+        setDpr(0.85);
+        degraded.current = false;
+        stableTime.current = 0;
+      }
+    } else if (average >= 0.018) {
+      stableTime.current = 0;
+    }
+    elapsed.current = 0;
+    frameTotal.current = 0;
+    frameCount.current = 0;
+  });
+  return null;
+}
+
+function SceneContent({ weather, hour, vehicleMode, interiorOpen, onInteract, onPosition, touchMovement, touchRun, cameraYaw }: WorldSceneProps) {
   return (
     <>
       <Environment weather={weather} hour={hour} />
@@ -707,15 +760,16 @@ function SceneContent({ weather, hour, vehicleMode, interiorOpen, onInteract, on
       {!interiorOpen && residents.map((resident) => (
         <Resident key={resident.id} id={resident.id} name={resident.name} seed={resident.seed} color={resident.color} start={resident.position} weather={weather} hour={hour} />
       ))}
-      <Player vehicleMode={vehicleMode} interiorOpen={interiorOpen} onInteract={onInteract} onPosition={onPosition} />
+      <Player vehicleMode={vehicleMode} interiorOpen={interiorOpen} onInteract={onInteract} onPosition={onPosition} touchMovement={touchMovement} touchRun={touchRun} cameraYaw={cameraYaw} />
     </>
   );
 }
 
 export default function WorldScene(props: WorldSceneProps) {
+  const dpr = typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches ? 0.78 : 0.95;
   return (
     <Canvas
-      dpr={[0.65, 0.9]}
+      dpr={dpr}
       camera={{ position: [0, 7.6, 27], fov: 48, near: 0.1, far: 160 }}
       gl={{ antialias: false, powerPreference: 'high-performance', alpha: false }}
       onCreated={({ gl }) => {
@@ -724,6 +778,7 @@ export default function WorldScene(props: WorldSceneProps) {
         gl.outputColorSpace = THREE.SRGBColorSpace;
       }}
     >
+      <AdaptiveDpr />
       {import.meta.env.DEV ? <RenderDiagnostics /> : null}
       <SceneContent {...props} />
     </Canvas>

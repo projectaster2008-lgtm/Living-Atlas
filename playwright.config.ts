@@ -13,7 +13,7 @@ export default defineConfig({
     headless: true,
     launchOptions: {
       executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe',
-      args: ['--no-sandbox', '--enable-webgl', '--use-gl=angle', '--use-angle=swiftshader', '--disable-gpu-sandbox'],
+      args: ['--no-sandbox', '--enable-webgl', '--ignore-gpu-blocklist', '--disable-gpu-sandbox'],
     },
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',

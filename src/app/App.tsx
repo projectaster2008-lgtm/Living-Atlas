@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, ArrowUpRight, Check, CloudDrizzle, CloudFog, Compass,
   Crosshair, Map, MessageCircle, Moon, Sun, X,
@@ -6,6 +6,7 @@ import {
 import WorldScene from '../rendering/scene/WorldScene';
 import { advanceClock, createClock, formatWorldTime } from '../simulation/core/clock';
 import type { WeatherState } from '../simulation/characters/resident-agent';
+import { normalizeTouchMovement, type TouchMovement } from '../gameplay/player/touch-input';
 
 type Interaction = { type: 'resident' | 'cafe' | 'vehicle'; id: string };
 type Dialogue = { name: string; text: string; id: string; reply?: string };
@@ -31,6 +32,13 @@ export default function App() {
   const [missionStep, setMissionStep] = useState(0);
   const [relationship, setRelationship] = useState<Record<string, number>>({ mara: 18, eli: 10, jonas: 8, lina: 12 });
   const [notice, setNotice] = useState('The town is waking up around you.');
+  const [touchMovement, setTouchMovement] = useState<TouchMovement>({ x: 0, z: 0 });
+  const [touchRun, setTouchRun] = useState(false);
+  const [cameraYaw, setCameraYaw] = useState(0);
+  const joystickRef = useRef<HTMLDivElement>(null);
+  const joystickPointer = useRef<number | null>(null);
+  const lookPointer = useRef<number | null>(null);
+  const lastLookX = useRef(0);
 
   const hour = Math.floor(clock.secondsOfDay / 3600);
   const timeLabel = formatWorldTime(clock);
@@ -59,6 +67,32 @@ export default function App() {
     const timer = window.setTimeout(() => setNotice(''), 3600);
     return () => window.clearTimeout(timer);
   }, [notice]);
+
+  useEffect(() => {
+    const stop = () => {
+      setTouchMovement({ x: 0, z: 0 });
+      setTouchRun(false);
+      joystickPointer.current = null;
+      lookPointer.current = null;
+    };
+    window.addEventListener('blur', stop);
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+    return () => {
+      window.removeEventListener('blur', stop);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+    };
+  }, []);
+
+  const updateJoystick = (clientX: number, clientY: number) => {
+    const bounds = joystickRef.current?.getBoundingClientRect();
+    if (!bounds) return;
+    const radius = bounds.width * 0.34;
+    const x = (clientX - (bounds.left + bounds.width / 2)) / radius;
+    const y = (clientY - (bounds.top + bounds.height / 2)) / radius;
+    setTouchMovement(normalizeTouchMovement(x, y));
+  };
 
   const weatherLabel = useMemo(() => ({
     clear: 'Clear skies',
@@ -91,11 +125,7 @@ export default function App() {
     if (interaction.type === 'resident') {
       const resident = residents[interaction.id];
       if (!resident) return;
-      setDialogue({
-        id: interaction.id,
-        name: resident.name,
-        text: resident.greeting,
-      });
+      setDialogue({ id: interaction.id, name: resident.name, text: resident.greeting });
       return;
     }
     if (interaction.type === 'cafe') {
@@ -111,7 +141,7 @@ export default function App() {
     }
     if (interaction.type === 'vehicle') {
       setVehicleMode((current) => !current);
-      setNotice(vehicleMode ? 'You stepped out of the coastal sedan.' : 'Vehicle entered. WASD to drive, E to exit.');
+      setNotice(vehicleMode ? 'You stepped out of the coastal sedan.' : 'Vehicle entered. Use the touch controls or WASD to drive.');
     }
   };
 
@@ -157,6 +187,9 @@ export default function App() {
           interiorOpen={interiorOpen}
           onInteract={handleInteraction}
           onPosition={setPosition}
+          touchMovement={touchMovement}
+          touchRun={touchRun}
+          cameraYaw={cameraYaw}
         />
       </div>
 
@@ -241,6 +274,48 @@ export default function App() {
         </div>
         <div className="bottom-status">
           <span className="status-pulse" /> {vehicleMode ? 'VEHICLE CONTROL' : interiorOpen ? 'INDOOR EXPLORATION' : 'FREE ROAM'}
+        </div>
+      </div>
+
+      <div className="touch-camera-zone" aria-label="Drag to look around" data-camera-yaw={cameraYaw.toFixed(3)}
+        onPointerDown={(event) => {
+          lookPointer.current = event.pointerId;
+          lastLookX.current = event.clientX;
+          event.currentTarget.setPointerCapture(event.pointerId);
+        }}
+        onPointerMove={(event) => {
+          if (lookPointer.current !== event.pointerId) return;
+          const delta = event.clientX - lastLookX.current;
+          lastLookX.current = event.clientX;
+          setCameraYaw((yaw) => yaw - delta * 0.006);
+        }}
+        onPointerUp={() => { lookPointer.current = null; }}
+        onPointerCancel={() => { lookPointer.current = null; }}
+      />
+
+      <div className="touch-controls" aria-label="Touch gameplay controls">
+        <div className="virtual-joystick" ref={joystickRef}
+          onPointerDown={(event) => {
+            joystickPointer.current = event.pointerId;
+            event.currentTarget.setPointerCapture(event.pointerId);
+            updateJoystick(event.clientX, event.clientY);
+          }}
+          onPointerMove={(event) => {
+            if (joystickPointer.current === event.pointerId) updateJoystick(event.clientX, event.clientY);
+          }}
+          onPointerUp={() => { joystickPointer.current = null; setTouchMovement({ x: 0, z: 0 }); }}
+          onPointerCancel={() => { joystickPointer.current = null; setTouchMovement({ x: 0, z: 0 }); }}
+          onLostPointerCapture={() => { joystickPointer.current = null; setTouchMovement({ x: 0, z: 0 }); }}
+        >
+          <span className="joystick-ring" />
+          <span className="joystick-knob" style={{ transform: `translate(calc(-50% + ${touchMovement.x * 26}px), calc(-50% + ${touchMovement.z * 26}px))` }} />
+          <span className="joystick-label">MOVE</span>
+        </div>
+        <div className="touch-action-stack">
+          <button className={touchRun ? 'touch-action active' : 'touch-action'} onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); setTouchRun(true); }} onPointerUp={() => setTouchRun(false)} onPointerCancel={() => setTouchRun(false)} onLostPointerCapture={() => setTouchRun(false)} onPointerLeave={() => setTouchRun(false)} aria-label="Hold to run">RUN</button>
+          <button className="touch-action touch-interact" disabled={!nearbyInteraction || Boolean(dialogue)} onClick={() => nearbyInteraction && handleInteraction(nearbyInteraction.interaction)} aria-label="Interact">
+            {interiorOpen ? 'EXIT' : vehicleMode ? 'EXIT' : 'ACTION'}
+          </button>
         </div>
       </div>
 
